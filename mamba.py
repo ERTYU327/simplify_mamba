@@ -151,7 +151,6 @@ class MAMBA(nn.Module):
             B = self.B_proj(u_t)  # (B, D_state)
             C = self.C_proj(u_t)  # (B, D_state)
             dt = self.dt_proj(u_t)  # (B, D_state)
-
             # 离散化参数
             A = -torch.exp(A)
             dt = F.softplus(dt)
@@ -161,10 +160,12 @@ class MAMBA(nn.Module):
             I = torch.ones(b, c, device=u.device)
             # dB = dt * B             # B̃ ≈ ΔB
             dB = (torch.exp(dA - I) / A) * B
-            h = dA * h + dB * x_t.unsqueeze(1)  # (B, D_state)
+            #h = dA * h + dB * x_t.unsqueeze(1)
+            h = dA * h + dB * x_t
             # 输出计算
-            y_t = torch.sum(C * h, dim=1, keepdim=False)   # (B, 1)
-            y_t = y_t.expand(-1, self.d_state)  # (B, D)
+            #y_t = torch.sum(C * h, dim=1, keepdim=False)   # (B, 1)
+            y_t = C * h
+            #y_t = y_t.expand(-1, self.d_state)  # (B, D)
             y_t = self.out_proj(y_t)
             outputs.append(y_t)
 
