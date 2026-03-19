@@ -94,11 +94,12 @@ class MAMBA(nn.Module):
         if h is None:
             h = torch.zeros(batch_size, self.d_state, device=u.device)
 
-        h_new = dA * h + dB * x.unsqueeze(1)  # (B, D_state)
+        h_new = dA * h + dB * x  # (B, D_state)
 
         # 输出计算
-        y = torch.sum(C * h_new, dim=1, keepdim=False)   # (B, 1)
-        y = y.expand(-1, self.d_state)  # (B, D)
+        #y = torch.sum(C * h_new, dim=1, keepdim=False)   # (B, 1)
+        y = C * h_new
+        #y = y.expand(-1, self.d_state)  # (B, D)
         y = self.out_proj(y)
 
         return y, h_new
