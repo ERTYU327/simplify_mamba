@@ -3,8 +3,16 @@ from pickletools import uint2
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
+def associative_scan(elems, combine):
+    L = elems.shape[0]
+    if L == 1:
+        return elems
+    left = elems[:L//2]
+    right = elems[L//2:]
+    left_scan = associative_scan(left, combine)
+    last_left = left_scan[-1]
+    right_combined = torch.stack([combine(last_left, x) for x in right], dim=0)
+    return torch.cat([left_scan, right_combined], dim=0)
 class MAMBA(nn.Module):
     def __init__(self, d_model=64, d_state=16):
         super(MAMBA, self).__init__()
@@ -116,7 +124,14 @@ class MAMBA(nn.Module):
 
         return y, h_new
 
-    def forward(self, u):
+    def combine(self, x, y):
+        # x, y: (2, B, D_state)
+        m1, n1 = x[0], x[1]
+        m2, n2 = y[0], y[1]
+        m_comb = m2 * m1
+        n_comb = m2 * n1 + n2
+        return torch.stack([m_comb, n_comb], dim=0)
+    def forward1(self, u):
         batch_size, seq_len, _ = u.shape
         # 输入投影
         x = self.in_proj(u)  # (B, L, D)
@@ -188,3 +203,46 @@ class MAMBA(nn.Module):
         output = torch.stack(outputs, dim=1)  # (B, L, D)
 
         return output
+    def forward(self, u):
+        batch_size, seq_len, _ = u.shape
+        # 输入投影
+        x = self.in_proj(u)  # (B, L, D)
+
+        A1 = self.A1_proj(u)
+        A2 = self.A2_proj(u)
+        A3 = self.A3_proj(u)
+        u1 = self.u1_proj(u)
+        u2 = self.u2_proj(u)
+        u3 = self.u3_proj(u)
+        point1 = torch.mul(A1, u1).sum(dim=2, keepdim=True)
+        point2 = torch.mul(A2, u2).sum(dim=2, keepdim=True)
+        point3 = torch.mul(A3, u3).sum(dim=2, keepdim=True)
+        scores = torch.cat([point1, point2, point3], dim=2)
+        weights = F.softmax(scores, dim=2)
+        A1_weighted = weights[:, :, 0:1] * A1
+        A2_weighted = weights[:, :, 1:2] * A2
+        A3_weighted = weights[:, :, 2:3] * A3
+        A = torch.cat([A1_weighted, A2_weighted, A3_weighted],
+                      dim=2)
+        B = self.B_proj(u)
+        C = self.C1_proj(u)
+        dt = self.dt_proj(u)
+        A = -torch.exp(A)
+        dt = F.softplus(dt)
+        I = torch.ones_like(A, device=u.device)
+        dA = dt * A + I
+        dB = dt * B
+        K = self.K_proj(u)
+        Mt = dA - dB * K
+        Nt = dB * x
+        elems = torch.stack([Mt, Nt], dim=1)  # (B, 2, L, D_state)
+        elems = elems.permute(2, 1, 0, 3)  # (L, 2, B, D_state)
+
+        result = associative_scan(elems, combine=self.combine)
+        result = result.permute(2, 1, 0, 3)  # (B, 2, L, D_state)
+        M_prefix, N_prefix = result[:, 0], result[:, 1]  # (B, L, D_state)
+
+        h_seq = N_prefix
+        y     = C * h_seq
+        y     = self.out_proj(y)
+        return y
