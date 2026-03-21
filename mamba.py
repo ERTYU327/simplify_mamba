@@ -165,12 +165,13 @@ class MAMBA(nn.Module):
             # 离散化参数
             A = -torch.exp(A)
             dt = F.softplus(dt)
-            dA = torch.exp(dt * A)  # Ã = exp(ΔA)
-            b = dA.size(0)
-            c = dA.size(1)
+            #dA = torch.exp(dt * A)  # Ã = exp(ΔA)
+            b = A.size(0)
+            c = A.size(1)
             I = torch.ones(b, c, device=u.device)
-            # dB = dt * B             # B̃ ≈ ΔB
-            dB = ((dA - I) / A) * B
+            dA = dt * A + I
+            #dB = ((dA - I) / A) * B
+            dB = dt * B
             #h = dA * h + dB * x_t.unsqueeze(1)
             K = self.K_proj(u_t)
             h_next = (dA - dB * K) * h + dB * x_t #encoder
