@@ -94,12 +94,14 @@ class MAMBA(nn.Module):
         # 离散化参数
         A = -torch.exp(A)  # 确保A是负的
         dt = F.softplus(dt)  # 确保dt是正的
-        dA = torch.exp(dt * A)
-        b = dA.size(0)
-        c = dA.size(1)
+        b = A.size(0)
+        c = A.size(1)
         I = torch.ones(b, c, device=u.device)
-        dB = ((dA - I) / A) * B
-        # dB = dt * B
+        #dA = torch.exp(dt * A)
+        dA = I + dt * A
+
+        #dB = ((dA - I) / A) * B
+        dB = dt * B
 
         # 初始化状态
         if h is None:
