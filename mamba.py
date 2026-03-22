@@ -21,41 +21,48 @@ class MAMBA(nn.Module):
 
         # 输入投影层
         self.in_proj = nn.Linear(d_model, d_state, bias=True)
-
+        #self.p_proj  = nn.Sequential(
+            #nn.Linear(d_model, d_state, bias=True),
+            #nn.Sigmoid(),
+            #nn.Linear(d_state, d_state, bias=True),
+            #nn.Sigmoid(),
+        #)
         # SSM参数投影层
         self.A1_proj = nn.Linear(d_model, d_state // 2, bias=True)
         self.A2_proj = nn.Linear(d_model, d_state // 4, bias=True)
         self.A3_proj = nn.Linear(d_model, d_state // 4, bias=True)
-        self.A4_proj = nn.Linear(d_model, d_state // 8, bias=True)
-        self.A5_proj = nn.Linear(d_model, d_state // 8, bias=True)
-        self.A6_proj = nn.Linear(d_model, d_state // 8, bias=True)
-        self.A7_proj = nn.Linear(d_model, d_state // 8, bias=True)
+        #self.A4_proj = nn.Linear(d_model, d_state // 8, bias=True)
+        #self.A5_proj = nn.Linear(d_model, d_state // 8, bias=True)
+        #self.A6_proj = nn.Linear(d_model, d_state // 8, bias=True)
+        #self.A7_proj = nn.Linear(d_model, d_state // 8, bias=True)
         self.u1_proj = nn.Linear(d_model, d_state // 2, bias=True)
         self.u2_proj = nn.Linear(d_model, d_state // 4, bias=True)
         self.u3_proj = nn.Linear(d_model, d_state // 4, bias=True)
-        self.u4_proj = nn.Linear(d_model, d_state // 8, bias=True)
-        self.u5_proj = nn.Linear(d_model, d_state // 8, bias=True)
-        self.u6_proj = nn.Linear(d_model, d_state // 8, bias=True)
-        self.u7_proj = nn.Linear(d_model, d_state // 8, bias=True)
+        #self.u4_proj = nn.Linear(d_model, d_state // 8, bias=True)
+        #self.u5_proj = nn.Linear(d_model, d_state // 8, bias=True)
+        #self.u6_proj = nn.Linear(d_model, d_state // 8, bias=True)
+        #self.u7_proj = nn.Linear(d_model, d_state // 8, bias=True)
         self.B_proj = nn.Linear(d_model, d_state, bias=True)
         self.C1_proj = nn.Linear(d_model, d_state, bias=True)
-        self.C2_proj = nn.Linear(d_model, d_state//4, bias=True)
-        self.C3_proj = nn.Linear(d_model, d_state//4, bias=True)
-        self.h1_proj = nn.Linear(d_state, d_state//2, bias=True)
-        self.h2_proj = nn.Linear(d_state, d_state//4, bias=True)
-        self.h3_proj = nn.Linear(d_state, d_state//4, bias=True)
+        #self.C2_proj = nn.Linear(d_model, d_state//4, bias=True)
+        #self.C3_proj = nn.Linear(d_model, d_state//4, bias=True)
+        #self.h1_proj = nn.Linear(d_state, d_state//2, bias=True)
+        #self.h2_proj = nn.Linear(d_state, d_state//4, bias=True)
+        #self.h3_proj = nn.Linear(d_state, d_state//4, bias=True)
         self.dt_proj = nn.Linear(d_model, d_state, bias=True)
 
         # 输出投影层
         self.out_proj = nn.Linear(d_state, d_model, bias=True)
-        self.A_fixed = nn.Parameter(torch.randn(d_state) * 0.1)  # 可训练，但不依赖输入
+        #self.A_fixed = nn.Parameter(torch.randn(d_state) * 0.1)  # 可训练，但不依赖输入
         self.K_proj = nn.Sequential(
             nn.Linear(d_model, d_state, bias=True),
             nn.Sigmoid(),
             nn.Linear(d_state, d_state, bias=True),
             nn.Sigmoid(),
         )
-        self.zuni = nn.Parameter(torch.tensor(0.5))
+        self.q = nn.Parameter(torch.ones(self.d_state) * 0.01)  # 过程噪声 (对角)
+        self.r = nn.Parameter(torch.ones(self.d_state) * 0.01)  # 观测噪声 (对角)
+        #self.zuni = nn.Parameter(torch.tensor(0.5))
     def step(self, u, h=None):
         batch_size = u.shape[0]
 
@@ -233,8 +240,54 @@ class MAMBA(nn.Module):
         dA = dt * A + I
         dB = dt * B
         K = self.K_proj(u)
-        Mt = dA - dB * K
-        Nt = dB * x
+        #Mt = dA - dB * K * C
+        #Nt = dB * x
+        Mt = dA - K * C * dA
+        Nt = (dB + K - K * C * dB) * x
+        elems = torch.stack([Mt, Nt], dim=1)  # (B, 2, L, D_state)
+        elems = elems.permute(2, 1, 0, 3)  # (L, 2, B, D_state)
+
+        result = associative_scan(elems, combine=self.combine)
+        result = result.permute(2, 1, 0, 3)  # (B, 2, L, D_state)
+        M_prefix, N_prefix = result[:, 0], result[:, 1]  # (B, L, D_state)
+
+        h_seq = N_prefix
+        y     = C * h_seq
+        y     = self.out_proj(y)
+        return y
+    def forward2(self, u):
+        batch_size, seq_len, _ = u.shape
+        # 输入投影
+        x = self.in_proj(u)
+        p  = self.p_proj(u)
+        A1 = self.A1_proj(u)
+        A2 = self.A2_proj(u)
+        A3 = self.A3_proj(u)
+        u1 = self.u1_proj(u)
+        u2 = self.u2_proj(u)
+        u3 = self.u3_proj(u)
+        point1 = torch.mul(A1, u1).sum(dim=2, keepdim=True)
+        point2 = torch.mul(A2, u2).sum(dim=2, keepdim=True)
+        point3 = torch.mul(A3, u3).sum(dim=2, keepdim=True)
+        scores = torch.cat([point1, point2, point3], dim=2)
+        weights = F.softmax(scores, dim=2)
+        A1_weighted = weights[:, :, 0:1] * A1
+        A2_weighted = weights[:, :, 1:2] * A2
+        A3_weighted = weights[:, :, 2:3] * A3
+        A = torch.cat([A1_weighted, A2_weighted, A3_weighted],
+                      dim=2)
+        B = self.B_proj(u)
+        C = self.C1_proj(u)
+        dt = self.dt_proj(u)
+        A = -torch.exp(A)
+        dt = F.softplus(dt)
+        I = torch.ones_like(A, device=u.device)
+        dA = dt * A + I
+        dB = dt * B
+        p_pred = (dA ** 2) * p + self.q.unsqueeze(0)  # (B, D)
+        k = p_pred * C / (C ** 2 * p_pred + self.r.unsqueeze(0) + 1e-8)  # (B, D)
+        Mt = dA - k * C * dA  # (B, D)
+        Nt = (dB + k - k * C * dB) * x  # (B, D)
         elems = torch.stack([Mt, Nt], dim=1)  # (B, 2, L, D_state)
         elems = elems.permute(2, 1, 0, 3)  # (L, 2, B, D_state)
 
