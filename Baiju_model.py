@@ -51,7 +51,6 @@ class BaijuFlex(nn.Module):
         self.A_projs = nn.ModuleList()
         self.u_projs = nn.ModuleList()
         self.k_projs = nn.ModuleList()
-        self.matrix_projs = nn.ModuleList()
         for dim in branch_dims:
             self.A_projs.append(nn.Sequential(
                 nn.Linear(d_state, dim, bias=True),
@@ -63,18 +62,14 @@ class BaijuFlex(nn.Module):
                 nn.Sigmoid(),
                 nn.Linear(dim, dim, bias=True),
             ))
-            self.matrix_projs.append(nn.Sequential(
-                nn.Linear(dim, dim, bias=True),
-                nn.Sigmoid(),
-                nn.Linear(dim, dim, bias=True),
-                nn.Sigmoid(),
-            ))
             self.k_projs.append(nn.Sequential(
                 nn.Linear(d_model, dim, bias=True),
                 nn.Sigmoid(),
                 nn.Linear(dim, dim, bias=True),
             ))
-
+        self.P_chol = nn.ParameterList()
+        for dim in branch_dims:
+            self.P_chol.append(nn.Parameter(torch.eye(dim)))
         # 因果卷积
         self.causalconv1d = CausalConv1d(
             in_channels=d_model, out_channels=d_state,
@@ -115,41 +110,37 @@ class BaijuFlex(nn.Module):
         A_list = []
         u_list = []
         k_list = []
-        A_minus_u_list = []
-        A_minus_u_matrix_list = []
         scale_list = []
         for i, dim in enumerate(self.branch_dims):
             A_i = self.A_projs[i](h)      # (B, L, dim)
             u_i = self.u_projs[i](u)      # (B, L, dim)
             k_i = self.k_projs[i](u)      # (B, L, dim)
             eps = 1e-8
-            A_i_minus_u_i_matrix = self.matrix_projs[i](torch.abs(A_i - u_i) + eps)
             scale_i = dim ** 0.5
             A_list.append(A_i)
             u_list.append(u_i)
             k_list.append(k_i)
-            A_minus_u_list.append(torch.abs(A_i - u_i) + eps)
-            A_minus_u_matrix_list.append(A_i_minus_u_i_matrix)
             scale_list.append(scale_i)
-        return A_list, u_list, k_list, A_minus_u_list, A_minus_u_matrix_list, scale_list
+        return A_list, u_list, k_list, scale_list
 
-    def _compute_scores_and_weights(self, A_list, u_list, k_list, A_minus_u_list, A_minus_u_matrix_list, scale_list):
-
+    def _compute_scores_and_weights(self, A_list, u_list, k_list, scale_list):
+        D = A_list[0].shape[2]
         scores_dot_list = []
         scores_euc_list = []
         scores_liman_list    = []
         for i in range(self.n_branches):
-            # 点积
             dot = (A_list[i] * u_list[i] / scale_list[i] * k_list[i]).sum(dim=2, keepdim=True)
             scores_dot_list.append(dot)
             diff = A_list[i] - u_list[i]
             dist = torch.norm(diff, p=2, dim=2, keepdim=True)
             euc = -dist / (scale_list[i] + 1e-8)
             scores_euc_list.append(euc)
-            liman = ((A_minus_u_list[i] * A_minus_u_matrix_list[i])**0.5).sum(dim=2, keepdim=True)
+            L = torch.tril(self.P_chol[i])
+            M_metrix = L @ L.T
+            liman = ((diff @ M_metrix) * diff).sum(dim=2, keepdim=True)
             scores_liman_list.append(liman)
-        scores_dot = torch.cat(scores_dot_list, dim=2)   # (B, L, n_branches)
-        scores_euc = torch.cat(scores_euc_list, dim=2)   # (B, L, n_branches)
+        scores_dot = torch.cat(scores_dot_list, dim=2)
+        scores_euc = torch.cat(scores_euc_list, dim=2)
         scores_liman = torch.cat(scores_liman_list, dim=2)
         w_dot = F.softmax(scores_dot, dim=2)   # 点积权重
         w_euc = F.softmax(scores_euc, dim=2)   # 欧氏权重
@@ -180,12 +171,9 @@ class BaijuFlex(nn.Module):
         h1 = h1.transpose(1, 2).squeeze(1)  # (B, d_state)
         h1_expand = h1.unsqueeze(1)  # (B, 1, d_state)
         u_expand = u.unsqueeze(1)  # (B, 1, d_model)
-        A_list, u_list, k_list, A_minus_u_list, A_minus_u_matrix_list, scale_list = self._get_branch_params(h1_expand,
-                                                                                                            u_expand)
+        A_list, u_list, k_list, scale_list = self._get_branch_params(h1_expand,u_expand)
         scores_dot, scores_euc, scores_liman, w_dot, w_euc, w_liman = self._compute_scores_and_weights(A_list, u_list,
                                                                                                        k_list,
-                                                                                                       A_minus_u_list,
-                                                                                                       A_minus_u_matrix_list,
                                                                                                        scale_list)
 
         A_dot = self._weighted_combine(A_list, w_dot, dim=-1)
@@ -256,11 +244,9 @@ class BaijuFlex(nn.Module):
         u_trans = u.transpose(1, 2)
         h = self.causalconv1d(u_trans)     # (B, d_state, L)
         h = h.transpose(1, 2)              # (B, L, d_state)
-        A_list, u_list, k_list, A_minus_u_list, A_minus_u_matrix_list, scale_list = self._get_branch_params(h,u)
+        A_list, u_list, k_list, scale_list = self._get_branch_params(h,u)
         scores_dot, scores_euc, scores_liman, w_dot, w_euc, w_liman = self._compute_scores_and_weights(A_list, u_list,
                                                                                                        k_list,
-                                                                                                       A_minus_u_list,
-                                                                                                       A_minus_u_matrix_list,
                                                                                                        scale_list)
 
         A_dot = self._weighted_combine(A_list, w_dot, dim=-1)
