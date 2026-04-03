@@ -103,7 +103,7 @@ class BaijuFlex(nn.Module):
             nn.Sigmoid(),
         )
 
-        self.dropout = nn.Dropout(p=0.1)  # 仅在输出时使用
+        self.dropout = nn.Dropout(p=0.00)  # 仅在输出时使用
 
     def _get_branch_params(self, h, u):
 
@@ -115,7 +115,6 @@ class BaijuFlex(nn.Module):
             A_i = self.A_projs[i](h)      # (B, L, dim)
             u_i = self.u_projs[i](u)      # (B, L, dim)
             k_i = self.k_projs[i](u)      # (B, L, dim)
-            eps = 1e-8
             scale_i = dim ** 0.5
             A_list.append(A_i)
             u_list.append(u_i)
@@ -188,14 +187,11 @@ class BaijuFlex(nn.Module):
         A_liman = -torch.exp(A_liman)
         dt = F.softplus(dt)
         I = torch.ones_like(A_dot)
-        dA_dot = torch.exp(A_dot * dt)
-        dA_euc = torch.exp(A_euc * dt)
-        dA_liman = torch.exp(A_liman * dt)
+        dA_dot = I + A_dot * dt
+        dA_euc = I + A_euc * dt
+        dA_liman = I + A_liman * dt
         dA = dA_dot + dA_euc + dA_liman + dA_dot * dA_euc * dA_liman
-        dB_dot = (dA_dot - I) / (A_dot * dt) * (B * dt)
-        dB_euc = (dA_euc - I) / (A_euc * dt) * (B * dt)
-        dB_liman = (dA_liman - I) / (A_liman * dt) * (B * dt)
-        dB = dB_dot + dB_euc + dB_liman + dB_dot * dB_euc * dB_liman
+        dB = B * dt
 
         # 初始化状态
         if h is None:
@@ -263,14 +259,11 @@ class BaijuFlex(nn.Module):
         A_liman = -torch.exp(A_liman)
         dt = F.softplus(dt)
         I = torch.ones_like(A_dot)
-        dA_dot = torch.exp(A_dot * dt)
-        dA_euc = torch.exp(A_euc * dt)
-        dA_liman = torch.exp(A_liman * dt)
+        dA_dot = I + A_dot * dt
+        dA_euc = I + A_euc * dt
+        dA_liman = I + A_liman * dt
         dA = dA_dot + dA_euc + dA_liman + dA_dot * dA_euc * dA_liman
-        dB_dot = (dA_dot - I) / (A_dot * dt) * (B * dt)
-        dB_euc = (dA_euc - I) / (A_euc * dt) * (B * dt)
-        dB_liman = (dA_liman - I) / (A_liman * dt) * (B * dt)
-        dB = dB_dot + dB_euc + dB_liman + dB_dot * dB_euc * dB_liman
+        dB = B * dt
 
 
         K1 = self.K_proj(scores_dot)   # (B, L, d_state)
