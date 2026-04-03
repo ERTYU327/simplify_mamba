@@ -234,9 +234,15 @@ class BaijuTrainer:
                 ppl = math.exp(avg_loss)
                 print(f'[TF] Epoch: {self.current_epoch} | Batch: {batch_idx}/{len(self.train_loader)} | '
                       f'Loss: {avg_loss:.4f} | PPL: {ppl:.2f}')
-            if batch_idx % (self.config['log_interval'] * 1000) == 0 and batch_idx > 0:
-                val_loss, val_ppl = self.validate_teacher_forcing()
-                print(f'val_Loss: {val_loss:.2f} | val_PPL: {val_ppl:.2f}')
+            #if batch_idx % (self.config['log_interval'] * 1000) == 0 and batch_idx > 0:
+                #val_loss, val_ppl = self.validate_teacher_forcing()
+                #print(f'val_Loss: {val_loss:.2f} | val_PPL: {val_ppl:.2f}')
+            if batch_idx % (self.config['log_interval'] * 100) == 0 and batch_idx > 0:
+                print("\n测试文本生成...")
+                prompt = "人工智能"
+                generated = self.generate_text(prompt, max_length=50, temperature=1.0, top_k=50)
+                print(f"提示: {prompt}")
+                print(f"生成: {generated}")
 
         avg_loss = total_loss / total_tokens
         ppl = math.exp(avg_loss)
@@ -343,7 +349,7 @@ class BaijuTrainer:
         finally:
             self.plot_losses()
 
-    def generate_text(self, prompt, max_length=100, temperature=1.0):
+    def generate_text(self, prompt, max_length=100, temperature=1.0, top_k=50):
         """生成文本"""
         self.model.eval()
 
@@ -369,11 +375,20 @@ class BaijuTrainer:
                     y, h = self.model.step(embeddings[:,-1,:])
                 else:
                     y, h = self.model.step(embeddings[:,-1,:], h)
-                # 获取下一个token的概率
+
                 logits = self.output_layer(y)
                 probs = torch.softmax(logits / temperature, dim=-1)
-                # 采样
-                next_token = torch.multinomial(probs[0], 1).item()
+
+                if top_k is not None and top_k > 0:
+
+                    top_k_probs, top_k_indices = torch.topk(probs, top_k, dim=-1)
+
+                    top_k_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)
+
+                    sampled_idx = torch.multinomial(top_k_probs[0], 1).item()
+                    next_token = top_k_indices[0, sampled_idx].item()
+                else:
+                    next_token = torch.multinomial(probs[0], 1).item()
                 generated_tokens.append(next_token)
 
                 # 如果遇到结束标记，停止生成
@@ -476,8 +491,8 @@ def main():
 
     # 测试文本生成
     print("\n测试文本生成...")
-    prompt = "为什么白天看不到星星。"
-    generated = trainer.generate_text(prompt, max_length=100,temperature=1.0)
+    prompt = "人工智能"
+    generated = trainer.generate_text(prompt, max_length=50,temperature=1.0)
     print(f"提示: {prompt}")
     print(f"生成: {generated}")
 
@@ -545,7 +560,7 @@ def eval(prompt, max_length=100, temperature=1.0):
 
 if __name__ == "__main__":
     main()
-    prompt = "为什么白天看不到星星。"
-    evaluate = eval(prompt, max_length=100, temperature=1.0)
+    prompt = "人工智能"
+    evaluate = eval(prompt, max_length=50, temperature=1.0)
     print(f"提示: {prompt}")
     print(f"生成: {evaluate}")
