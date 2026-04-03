@@ -6,6 +6,7 @@ import os
 import math
 from data_loader_conversation import create_data_loader
 from LM import LM
+from Baiju13 import BaijuFlex
 import matplotlib.pyplot as plt
 import transformers
 class BaijuTrainer:
@@ -24,7 +25,12 @@ class BaijuTrainer:
         )
         val_ratio = config.get('val_ratio', 5e-4)
         self.train_loader, self.val_loader = self.split_train_val(self.train_loader, val_ratio)
-
+        self.model1 = BaijuFlex(
+            d_model=config['d_model'],
+            d_state=config['d_state'],
+            first_block=config['first_block'],
+            other_block=config['other_block'],
+        ).to(self.device)
         self.model = LM(
             d_model=config['d_model'],
             d_state=config['d_state'],
@@ -47,7 +53,7 @@ class BaijuTrainer:
         #self.optimizer = optim.Adafactor(
             #list(self.model.parameters()) + list(self.embedding.parameters()) + list(self.output_layer.parameters()),
             #lr=config['learning_rate'],
-            #weight_decay=config['weight_decay']
+            #weight_decay=config['weight_decay'],
         #)
         self.optimizer = transformers.Adafactor(
             list(self.model.parameters()) + list(self.embedding.parameters()) + list(self.output_layer.parameters()),
@@ -61,8 +67,7 @@ class BaijuTrainer:
         )
         #self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             #self.optimizer,
-            #T_max=config['num_epochs']
-            #5000
+            #T_max=config['num_epochs'],
         #)
         self.auto_reg_ratio = 0.0  # 初始全 teacher forcing
         self.auto_reg_increment = 0.05  # 每个 epoch 增加比例
@@ -78,7 +83,9 @@ class BaijuTrainer:
         print(f"词汇表大小: {self.vocab_size}")
 
     def count_parameters(self):
-        return sum(p.numel() for p in list(self.model.parameters()))
+        return sum(p.numel() for p in list(self.model.parameters())
+         + list(self.embedding.parameters())
+         + list(self.output_layer.parameters()) if p.requires_grad)
 
     def split_train_val(self, train_loader, val_ratio):
         """从原始 train_loader 中拆分出验证集"""
@@ -441,11 +448,11 @@ def main():
     # 训练配置
     config = {
         'data_path': 'Congliu/Chinese-DeepSeek-R1-Distill-data-110k',
-        'batch_size': 2,
+        'batch_size': 8,
         'seq_len': 256,
         'd_model': 256,
         'd_state': 256,
-        'learning_rate': 1e-2,
+        'learning_rate': 1e-3,
         'weight_decay': 1e-4,
         'grad_clip': 1,
         'num_epochs': 1,
@@ -477,11 +484,11 @@ def main():
 def eval(prompt, max_length=100, temperature=1.0):
     config = {
         'data_path': 'Congliu/Chinese-DeepSeek-R1-Distill-data-110k',
-        'batch_size': 2,
+        'batch_size': 8,
         'seq_len': 256,
         'd_model': 256,
         'd_state': 256,
-        'learning_rate': 1e-2,
+        'learning_rate': 1e-3,
         'weight_decay': 1e-4,
         'grad_clip': 1,
         'num_epochs': 1,
