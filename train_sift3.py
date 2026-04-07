@@ -339,13 +339,16 @@ class BaijuTrainer:
             labels = batch['labels'].to(self.device)
             _,L1 = labels.shape
             _,L2 = input_ids.shape
-            L    = L1 + L2
-            if batch_idx <= 3000000:
+            L_total = L1 + L2
+            if batch_idx <= 30000:
                full_ids  = torch.cat([input_ids, labels], dim=1)
-               embeddings = self.embedding(full_ids)
+               L1_new = L1 - (L1*batch_idx)//30000
+               L      = L1_new + L2
+               full_ids_new  = full_ids[:,:L]
+               embeddings = self.embedding(full_ids_new)
                causal_mask = torch.tril(torch.ones((1, L, 1), device=embeddings.device, dtype=embeddings.dtype))
                embeddings = embeddings.masked_fill(causal_mask == 0, float('-inf'))
-               outputs = self.model(embeddings,L)
+               outputs = self.model(embeddings,L_total)
                logits = self.output_layer(outputs)
                ce_loss = self.criterion(logits.view(-1, self.vocab_size), full_ids.view(-1))
             else:
