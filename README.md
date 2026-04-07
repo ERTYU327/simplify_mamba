@@ -63,6 +63,10 @@
    - h_new3 = (dA - (K3 * C + K1 + K2) * dA) * h + (dB + K3 - K2 * K1 * K3 * C * dB) * x
    - h = h_new1 + h_new2 + h_new3
 
+11. **调整：添加因果掩码**
+   
+12. **调整：调整训练参数并换用BELLE的3.5M数据集(使用hugging_face下载，缓存文件夹train_data），重构代码解决曝光偏差问题，下载完成后，运行文件train_sft3即可**
+
 
 ## 🚀 技术特点
 
