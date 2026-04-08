@@ -65,20 +65,18 @@ class SFTDataset(Dataset):
         response_ids = response_enc['input_ids']
         #prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
         #response_ids = self.tokenizer.encode(response, add_special_tokens=False)
+        self.tokenizer.add_special_tokens({'additional_special_tokens': ['<|sep|>']})
         prompt_len = len(prompt_ids)
         if self.tokenizer.eos_token_id is not None:
             response_ids.append(self.tokenizer.eos_token_id)
 
         input_ids = prompt_ids + response_ids
-
-        labels = [-100] * prompt_len + response_ids
+        response = [-100] * len(prompt_ids)  + response_ids
         return {
             'input_ids': input_ids,
-            'labels': labels,
-            'attention_mask': [1] * len(input_ids)  # 临时，collate 时会重新生成
+            'response': response,
+            'attention_mask': [1] * len(input_ids) ,
         }
-
-
 def collate_fn(batch: List[Dict], tokenizer: AutoTokenizer, max_length: int):
     """
     动态 padding 和截断，生成 attention_mask，并返回张量。
@@ -86,30 +84,31 @@ def collate_fn(batch: List[Dict], tokenizer: AutoTokenizer, max_length: int):
     input_ids_list = []
     labels_list = []
     for item in batch:
-        input_ids = item['input_ids'][:max_length]  # 截断
-        labels = item['labels'][:max_length]
+        #input_ids = item['input_ids'][:max_length]  # 截断
+        input_ids = item["input_ids"]
+        #response = item['response'][:max_length]
+        response = item["response"]
         input_ids_list.append(input_ids)
-        labels_list.append(labels)
+        labels_list.append(response)
 
-    max_len = max(len(ids) for ids in input_ids_list)
-    max_len = min(max_len, max_length)
+    #max_len = max(len(ids) for ids in input_ids_list)
+    #max_len = min(max_len, max_length)
 
-    padded_input_ids = []
-    padded_labels = []
-    attention_masks = []
-    for input_ids, labels in zip(input_ids_list, labels_list):
-        pad_len = max_len - len(input_ids)
-        pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-        padded_input_ids.append(input_ids + [pad_id] * pad_len)
-        padded_labels.append(labels + [-100] * pad_len)
-        attention_masks.append([1] * len(input_ids) + [0] * pad_len)
+    #padded_input_ids = []
+    #padded_labels = []
+    #attention_masks = []
+    #for input_ids, labels in zip(input_ids_list, labels_list):
+        #pad_len = max_len - len(input_ids)
+        #pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+        #padded_input_ids.append(input_ids + [pad_id] * pad_len)
+        #padded_labels.append(labels + [-100] * pad_len)
+        #attention_masks.append([1] * len(input_ids) + [0] * pad_len)
 
     return {
-        'input_ids': torch.tensor(padded_input_ids, dtype=torch.long),
-        'labels': torch.tensor(padded_labels, dtype=torch.long),
-        'attention_mask': torch.tensor(attention_masks, dtype=torch.long)
+        'input_ids': torch.tensor(input_ids_list, dtype=torch.long),
+        'response': torch.tensor(labels_list, dtype=torch.long),
+        #'attention_mask': torch.tensor(attention_masks, dtype=torch.long),
     }
-
 
 def create_sft_dataloader(dataset_name, tokenizer,
                           batch_size, max_length, num_workers):

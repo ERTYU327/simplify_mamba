@@ -31,15 +31,18 @@ class BaijuFlex(nn.Module):
         self.d_state = d_state
 
         branch_dims = []
-        first_dim = d_state // first_block
-        other_dim = d_state // other_block
-
         if first_block == 1 and other_block == 0:
+            first_dim = d_state
+            other_dim = 0
             branch_dims.append(d_state)
         elif first_block == 1 and other_block == 1:
-            branch_dims.append(d_state//2)
-            branch_dims.append(d_state//2)
+            first_dim = d_state // 2
+            other_dim = d_state // 2
+            branch_dims.append(d_state // 2)
+            branch_dims.append(d_state // 2)
         else:
+            first_dim = d_state // first_block
+            other_dim = d_state // other_block
             branch_dims.append(first_dim)
             for i in range(other_block - 2):
                 branch_dims.append(other_dim)
@@ -86,11 +89,13 @@ class BaijuFlex(nn.Module):
             nn.Linear(d_model, d_state, bias=True),
             nn.Sigmoid(),
             nn.Linear(d_state, d_state, bias=True),
+            nn.Sigmoid(),
         )
         self.dt_proj = nn.Sequential(
             nn.Linear(d_model, d_state, bias=True),
             nn.Sigmoid(),
             nn.Linear(d_state, d_state, bias=True),
+            nn.Sigmoid(),
         )
 
         # 输出投影
@@ -103,7 +108,7 @@ class BaijuFlex(nn.Module):
             nn.Sigmoid(),
         )
 
-        self.dropout = nn.Dropout(p=0.00)  # 仅在输出时使用
+        self.dropout = nn.Dropout(p=0.1)  # 仅在输出时使用
 
     def _get_branch_params(self, h, u):
 
@@ -123,7 +128,7 @@ class BaijuFlex(nn.Module):
         return A_list, u_list, k_list, scale_list
 
     def _compute_scores_and_weights(self, A_list, u_list, k_list, scale_list):
-        D = A_list[0].shape[2]
+        B, L, D = A_list[0].shape
         scores_dot_list = []
         scores_euc_list = []
         scores_liman_list    = []
@@ -134,18 +139,48 @@ class BaijuFlex(nn.Module):
             dist = torch.norm(diff, p=2, dim=2, keepdim=True)
             euc = -dist / (scale_list[i] + 1e-8)
             scores_euc_list.append(euc)
-            L = torch.tril(self.P_chol[i])
-            M_metrix = L @ L.T
+            H = torch.tril(self.P_chol[i])
+            M_metrix = H @ H.T
             liman = ((diff @ M_metrix) * diff).sum(dim=2, keepdim=True)
             scores_liman_list.append(liman)
         scores_dot = torch.cat(scores_dot_list, dim=2)
         scores_euc = torch.cat(scores_euc_list, dim=2)
         scores_liman = torch.cat(scores_liman_list, dim=2)
+        causal_mask = torch.tril(torch.ones((1, L, 1), device=scores_dot.device, dtype=scores_dot.dtype))
+        scores_dot = scores_dot.masked_fill(causal_mask == 0, float('-inf'))
+        scores_euc = scores_euc.masked_fill(causal_mask == 0, float('-inf'))
+        scores_liman = scores_liman.masked_fill(causal_mask == 0, float('-inf'))
         w_dot = F.softmax(scores_dot, dim=2)   # 点积权重
         w_euc = F.softmax(scores_euc, dim=2)   # 欧氏权重
         w_liman = F.softmax(scores_liman, dim=2)
         return scores_dot, scores_euc, scores_liman, w_dot, w_euc, w_liman
-
+    def _compute_scores_and_weights_generate(self, A_list, u_list, k_list, scale_list):
+        B, L, D = A_list[0].shape
+        scores_dot_list = []
+        scores_euc_list = []
+        scores_liman_list    = []
+        for i in range(self.n_branches):
+            dot = (A_list[i] * u_list[i] / scale_list[i] * k_list[i]).sum(dim=2, keepdim=True)
+            scores_dot_list.append(dot)
+            diff = A_list[i] - u_list[i]
+            dist = torch.norm(diff, p=2, dim=2, keepdim=True)
+            euc = -dist / (scale_list[i] + 1e-8)
+            scores_euc_list.append(euc)
+            H = torch.tril(self.P_chol[i])
+            M_metrix = H @ H.T
+            liman = ((diff @ M_metrix) * diff).sum(dim=2, keepdim=True)
+            scores_liman_list.append(liman)
+        scores_dot = torch.cat(scores_dot_list, dim=2)
+        scores_euc = torch.cat(scores_euc_list, dim=2)
+        scores_liman = torch.cat(scores_liman_list, dim=2)
+        causal_mask = torch.tril(torch.ones((1, L, 1), device=scores_dot.device, dtype=scores_dot.dtype))
+        scores_dot = scores_dot.masked_fill(causal_mask == 0, float('-inf'))
+        scores_euc = scores_euc.masked_fill(causal_mask == 0, float('-inf'))
+        scores_liman = scores_liman.masked_fill(causal_mask == 0, float('-inf'))
+        w_dot = F.softmax(scores_dot, dim=2)   # 点积权重
+        w_euc = F.softmax(scores_euc, dim=2)   # 欧氏权重
+        w_liman = F.softmax(scores_liman, dim=2)
+        return scores_dot, scores_euc, scores_liman, w_dot, w_euc, w_liman
     def _weighted_combine(self, A_list, w, dim):
 
         weighted_parts = []
@@ -164,6 +199,10 @@ class BaijuFlex(nn.Module):
         h: 上一时刻的隐藏状态 (B, d_state)
         """
         batch_size = u.shape[0]
+        if u.dim == 2:
+            u = u
+        else:
+            u = u.squeeze(1)
         x = self.in_proj(u.unsqueeze(1))  # (B, 1, d_state)
         u_trans = u.unsqueeze(1).transpose(1, 2)  # (B, d_model, 1)
         h1 = self.causalconv1d(u_trans)  # (B, d_state, 1)
@@ -171,46 +210,38 @@ class BaijuFlex(nn.Module):
         h1_expand = h1.unsqueeze(1)  # (B, 1, d_state)
         u_expand = u.unsqueeze(1)  # (B, 1, d_model)
         A_list, u_list, k_list, scale_list = self._get_branch_params(h1_expand,u_expand)
-        scores_dot, scores_euc, scores_liman, w_dot, w_euc, w_liman = self._compute_scores_and_weights(A_list, u_list,
+        scores_dot, scores_euc, scores_liman, w_dot, w_euc, w_liman = self._compute_scores_and_weights_generate(A_list, u_list,
                                                                                                        k_list,
                                                                                                        scale_list)
 
         A_dot = self._weighted_combine(A_list, w_dot, dim=-1)
         A_euc = self._weighted_combine(A_list, w_euc, dim=-1)
         A_liman = self._weighted_combine(A_list, w_liman, dim=-1)
-
-        B = self.B_proj(u_expand)  # (B, 1, d_state)
-        C = self.C1_proj(u_expand)  # (B, 1, d_state)
-        dt = self.dt_proj(u_expand)  # (B, 1, d_state)
-        A_dot = -torch.exp(A_dot)
-        A_euc = -torch.exp(A_euc)
-        A_liman = -torch.exp(A_liman)
-        dt = F.softplus(dt)
-        I = torch.ones_like(A_dot)
-        dA_dot = I + A_dot * dt
-        dA_euc = I + A_euc * dt
-        dA_liman = I + A_liman * dt
-        dA = dA_dot + dA_euc + dA_liman + dA_dot * dA_euc * dA_liman
-        dB = B * dt
-
-        # 初始化状态
-        if h is None:
-            h = torch.zeros_like(A_dot)  # (B, d_state)
-
-        # K 投影
-        K1 = self.K_proj(scores_dot)  # (B, d_state)
-        K2 = self.K_proj(scores_euc)  # (B, d_state)
+        A = A_dot + A_euc + A_liman + A_liman * A_dot * A_euc
+        B = self.B_proj(u)  # (B, L, d_state)
+        C = self.C1_proj(u)  # (B, L, d_state)1
+        dt = self.dt_proj(u)  # (B, L, d_state)
+        K1 = self.K_proj(scores_dot)
+        K2 = self.K_proj(scores_euc)
         K3 = self.K_proj(scores_liman)
-        h_new1 = (dA - (K1 * C + K2 + K3) * dA) * h + (dB + K1 - K2 * K1 * K3 * C * dB) * x
-        h_new2 = (dA - (K2 * C + K1 + K3) * dA) * h + (dB + K2 - K2 * K1 * K3 * C * dB) * x
-        h_new3 = (dA - (K3 * C + K1 + K2) * dA) * h + (dB + K3 - K2 * K1 * K3 * C * dB) * x
-        h_new = self.layer_norm(h_new1 + h_new2 + h_new3)
+        A = -torch.exp(A)
+        dt = F.softplus(dt)
+        I = torch.ones_like(A)
+        dA = I + A * dt
+        dB = B * dt
+        S = I - dt
+        if h is None:
+            h = torch.zeros_like(A)
+        h_seq1 = dA * (I - (K1 * C + K2 + K3) * S / 4) * h + (dB + K1 - K2 * K1 * K3 * C * dB) * u
+        h_seq2 = dA * (I - (K2 * C + K1 + K3) * S / 4) * h + (dB + K2 - K2 * K1 * K3 * C * dB) * u
+        h_seq3 = dA * (I - (K3 * C + K2 + K1) * S / 4) * h + (dB + K3 - K2 * K1 * K3 * C * dB) * u
+        h_next = h_seq1 + h_seq2 + h_seq3
+        h = C * h_next
 
-        y = C * h_new
-        y = y.squeeze(1)
-        y = self.out_proj(y)
-        y = self.dropout(y)
-        return y, h_new
+        y_final = self.out_proj(h)  # (B, L, d_model)
+        y_final = self.layer_norm(y_final)
+        y_final = self.dropout(y_final)
+        return y_final, h_next
 
     def combine(self, x, y):
         """
@@ -248,51 +279,42 @@ class BaijuFlex(nn.Module):
         A_dot = self._weighted_combine(A_list, w_dot, dim=-1)
         A_euc = self._weighted_combine(A_list, w_euc, dim=-1)
         A_liman = self._weighted_combine(A_list, w_liman, dim=-1)
-
-
-        B = self.B_proj(u)          # (B, L, d_state)
-        C = self.C1_proj(u)         # (B, L, d_state)
-        dt = self.dt_proj(u)        # (B, L, d_state)
-
-        A_dot = -torch.exp(A_dot)
-        A_euc = -torch.exp(A_euc)
-        A_liman = -torch.exp(A_liman)
-        dt = F.softplus(dt)
-        I = torch.ones_like(A_dot)
-        dA_dot = I + A_dot * dt
-        dA_euc = I + A_euc * dt
-        dA_liman = I + A_liman * dt
-        dA = dA_dot + dA_euc + dA_liman + dA_dot * dA_euc * dA_liman
-        dB = B * dt
-
-
-        K1 = self.K_proj(scores_dot)   # (B, L, d_state)
-        K2 = self.K_proj(scores_euc)   # (B, L, d_state)
+        A = A_dot + A_euc + A_liman + A_dot * A_liman * A_euc
+        B = self.B_proj(u)  # (B, L, d_state)
+        C = self.C1_proj(u)  # (B, L, d_state)
+        dt = self.dt_proj(u)  # (B, L, d_state)
+        K1 = self.K_proj(scores_dot)
+        K2 = self.K_proj(scores_euc)
         K3 = self.K_proj(scores_liman)
+        A = -torch.exp(A)
+        dt = F.softplus(dt)
+        I = torch.ones_like(A)
+        dA = I + A * dt
+        dB = B * dt
+        S = I - dt
+        Mt1 = dA * (I - (K1 * C + K2 + K3) * S / 4)
+        Nt1 = (dB + K1 - K2 * K1 * K3 * C * dB) * u
+        elems1 = torch.stack([Mt1, Nt1], dim=1).permute(2, 1, 0, 3)  # (L, 2, B, d_state)
+        result1 = associative_scan(elems1, combine=self.combine)
+        result1 = result1.permute(2, 1, 0, 3)  # (B, 2, L, d_state)
+        h_seq1 = result1[:, 1]  # (B, L, d_state)
 
-        Mt1 = dA - (K1 * C + K2 + K3) * dA
-        Nt1 = (dB + K1 - K2 * K1 * K3 * C * dB) * x
-        Mt1 = Mt1.permute(1, 0, 2)
-        Nt1 = Nt1.permute(1, 0, 2)
-        h_seq1 = self.linear_scan(Mt1, Nt1)
-        h_seq1 = h_seq1.permute(1, 0, 2)
+        Mt2 = dA * (I - (K2 * C + K1 + K3) * S / 4)
+        Nt2 = (dB + K2 - K1 * K2 * K3 * C * dB) * u
+        elems2 = torch.stack([Mt2, Nt2], dim=1).permute(2, 1, 0, 3)
+        result2 = associative_scan(elems2, combine=self.combine)
+        result2 = result2.permute(2, 1, 0, 3)
+        h_seq2 = result2[:, 1]
 
-        Mt2 = (dA - (K2 * C + K1 + K3) * dA)
-        Nt2 = (dB + K2 - K1 * K2 * K3 * C * dB) * x
-        Mt2 = Mt2.permute(1, 0, 2)
-        Nt2 = Nt2.permute(1, 0, 2)
-        h_seq2 = self.linear_scan(Mt2, Nt2)
-        h_seq2 = h_seq2.permute(1, 0, 2)
-
-        Mt3 = dA - (K3 * C + K1 + K2) * dA
-        Nt3 = (dB + K3 - K1 * K2 * K3 * C * dB) * x
-        Mt3 = Mt3.permute(1, 0, 2)
-        Nt3 = Nt3.permute(1, 0, 2)
-        h_seq3 = self.linear_scan(Mt3, Nt3)
-        h_seq3 = h_seq3.permute(1, 0, 2)
-
-        h_seq = self.layer_norm(h_seq1 + h_seq2 + h_seq3)
-        y = C * h_seq
-        y = self.out_proj(y)
-        y = self.dropout(y)
-        return y
+        Mt3 = dA * (I - (K3 * C + K1 + K2) * S / 4)
+        Nt3 = (dB + K3 - K1 * K2 * K3 * C * dB) * u
+        elems3 = torch.stack([Mt3, Nt3], dim=1).permute(2, 1, 0, 3)
+        result3 = associative_scan(elems3, combine=self.combine)
+        result3 = result3.permute(2, 1, 0, 3)
+        h_seq3 = result3[:, 1]
+        h_next = h_seq1 + h_seq2 + h_seq3
+        h = C * h_next
+        y_final = self.out_proj(h)  # (B, L, d_model)
+        y_final = self.layer_norm(y_final)
+        y_final = self.dropout(y_final)
+        return y_final
