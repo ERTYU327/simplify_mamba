@@ -1,4 +1,5 @@
 import os
+
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 print(f'开始加载')
 from transformers import AutoTokenizer
@@ -9,16 +10,15 @@ print('加载完成')
 TOKENIZER = tokenizer
 import math
 import time
-from collections import Counter
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-import transformers
 from torch.nn import functional as F
 from BaijuFlex import BaijuFlex
-from LM import LM
 from data_loader_sft import create_sft_dataloader
 from torch.utils.data import DataLoader
+import numpy as np
+from LM import LM
 class BaijuTrainer:
     def __init__(self, config):
         self.config = config
@@ -34,18 +34,18 @@ class BaijuTrainer:
             max_length=866,
             num_workers=config.get('num_workers', 0)
         )
+
         self.tokenizer = tokenizer
         self.vocab_size = len(self.tokenizer)
         val_ratio = config.get('val_ratio', 5e-4)
         self.train_loader, self.val_loader = self.split_train_val(self.train_loader, val_ratio)
-        self.model = BaijuFlex(
+        self.model = LM(
             d_model=config['d_model'],
             d_state=config['d_state'],
             num_blocks=config['num_blocks'],
         ).to(self.device)
         self.embedding = nn.Embedding(self.vocab_size, config['d_model']).to(self.device)
         self.output_layer = nn.Linear(config['d_model'], self.vocab_size).to(self.device)
-
         self.criterion = nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=0.1).to(self.device)
         #self.optimizer = transformers.Adafactor(
             #list(self.model.parameters()) + list(self.embedding.parameters()) + list(self.output_layer.parameters()),
@@ -61,8 +61,6 @@ class BaijuTrainer:
                                            , lr=config['learning_rate'],
                                            weight_decay=config['weight_decay'])
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer,T_0=200, T_mult=2, eta_min=1e-6)
-        self.auto_reg_ratio = 0.0  # 初始全 teacher forcing
-        self.auto_reg_increment = 0.05  # 每个 epoch 增加比例
         self.total_epochs = config['num_epochs']  # 用于计算最终比例
         # 训练状态
         self.current_epoch = 0
@@ -74,12 +72,13 @@ class BaijuTrainer:
         print(f"模型参数数量: {self.count_parameters():,}")
         print(f"词汇表大小: {self.vocab_size}")
 
-    def warmup_cosine(self, step, warmup_steps, total_steps, peak_lr=1e-4, min_lr=1e-6):
-        if step < warmup_steps:
-            return step / warmup_steps  # 线性增加
-        else:
-            progress = (step - warmup_steps) / (total_steps - warmup_steps)
-            return min_lr + 0.5 * (peak_lr - min_lr) * (1 + math.cos(math.pi * progress))
+    def contrastive_loss(self, anchor, positive, temperature=0.1):
+
+        anchor = F.normalize(anchor, dim=-1)
+        positive = F.normalize(positive, dim=-1)
+        logits = torch.matmul(anchor, positive.T) / temperature
+        labels = torch.arange(logits.size(0), device=logits.device)
+        return F.cross_entropy(logits, labels)
 
     def count_parameters(self):
         return sum(p.numel() for p in list(self.model.parameters())
@@ -93,7 +92,7 @@ class BaijuTrainer:
         train_len = total_len - val_len
         train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_len, val_len])
 
-        from data_loader_conversation2 import collate_fn
+        from data_loader_sft import collate_fn
         train_loader = DataLoader(
             train_dataset, batch_size=self.config['batch_size'], shuffle=True,
             num_workers=self.config['num_workers'], pin_memory=True,
@@ -186,7 +185,6 @@ class BaijuTrainer:
                 sorted_logits, sorted_indices = torch.sort(logits, descending=True)
                 cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
                 sorted_indices_to_remove = cumulative_probs > top_p
-                # 至少保留一个 token
                 sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
                 sorted_indices_to_remove[0] = False
                 indices_to_remove = torch.zeros_like(logits, dtype=torch.bool)
@@ -332,45 +330,34 @@ class BaijuTrainer:
         self.model.train()
         total_loss = 0
         total_tokens = 0
+        loss = 0
         accumulation_steps = self.config.get('gradient_accumulation_steps', 4)
         self.optimizer.zero_grad()
         for batch_idx, batch in enumerate(self.train_loader):
-            input_ids = batch['input_ids'].to(self.device)
-            labels = batch['labels'].to(self.device)
-            _,L1 = labels.shape
-            _,L2 = input_ids.shape
-            L_total = L1 + L2
+            input_ids = batch['input_ids'].to(self.device)  # (B, L)
+            labels = batch['labels'].to(self.device)  # (B, L)
+            response_start = (labels != -100).nonzero(as_tuple=True)[0][0]
+            response_ids = input_ids[response_start:]
+            prompt_ids = input_ids[:response_start - 1]
+            B, L = input_ids.shape
+            _, L1 = response_ids.shape
             if batch_idx <= 30000:
-               full_ids  = torch.cat([input_ids, labels], dim=1)
-               L1_new = L1 - (L1*batch_idx)//30000
-               L      = L1_new + L2
-               full_ids_new  = full_ids[:,:L]
-               embeddings = self.embedding(full_ids_new)
-               causal_mask = torch.tril(torch.ones((1, L, 1), device=embeddings.device, dtype=embeddings.dtype))
-               embeddings = embeddings.masked_fill(causal_mask == 0, float('-inf'))
-               outputs = self.model(embeddings,L_total)
-               logits = self.output_layer(outputs)
-               ce_loss = self.criterion(logits.view(-1, self.vocab_size), full_ids.view(-1))
-            else:
                embeddings = self.embedding(input_ids)
-               outputs = self.model(embeddings,L1)
+               outputs,A_loss = self.model(embeddings,L)
                logits = self.output_layer(outputs)
                ce_loss = self.criterion(logits.view(-1, self.vocab_size), labels.view(-1))
-            probs = F.softmax(logits, dim=-1)
-            labels_safe = labels.clone()
-            labels_safe[labels == -100] = 0
-            correct_probs = probs.gather(dim=-1, index=labels_safe.unsqueeze(-1)).squeeze(-1)
-            valid_mask = (labels != -100).float()
-            correct_probs = correct_probs * valid_mask
-            rep_mask = (labels[:, 1:] == labels[:, :-1]) & (labels[:, 1:] != -100) & (labels[:, :-1] != -100)
-            rep_penalty = -torch.log(1 - correct_probs[:, 1:] + 1e-8)
-            rep_loss = (rep_mask.float() * rep_penalty).mean()
-            lambda_rep = 0.0
-            loss = ce_loss + lambda_rep * rep_loss
+               loss = ce_loss + A_loss
+            #一个epoch后切换到这里的纯自回归
+            #if L1 <= 0:
+                #continue
+            #else:
+                #embeddings = self.embedding(prompt_ids)
+                #outputs,A_loss = self.model(embeddings,L1)
+                #logits = self.output_layer(outputs)
+                #ce_loss = self.criterion(logits.view(-1, self.vocab_size), response_ids.view(-1))
 
             if torch.isinf(loss) or torch.isnan(loss):
                 continue
-
             loss = loss / accumulation_steps
             loss.backward()
 
@@ -391,8 +378,8 @@ class BaijuTrainer:
                 print(f'[TF] Epoch: {self.current_epoch} | Batch: {batch_idx}/{len(self.train_loader)} | '
                       f'Loss: {avg_loss:.4f} | '
                       f'PPL: {ppl:.2f} ｜ '
-                      #f'chayiLoss: {A_list_loss:.4f} | '
-                      f'rep_loss: {lambda_rep * rep_loss:.4f}')
+                      f'chayiLoss: {A_loss.item():.4f} | ')
+                      #f'rep_loss: {lambda_rep * rep_loss:.4f}｜')
             if batch_idx % (self.config['log_interval'] * 100) == 0 and batch_idx > 0:
                 print("\n测试文本生成...")
                 prompt1 = "人工智能"
@@ -585,10 +572,6 @@ class BaijuTrainer:
         print("开始训练...")
         os.makedirs(self.config['save_dir'], exist_ok=True)
 
-        # 设置初始比例
-        self.auto_reg_ratio = 0.4
-        increment = self.auto_reg_increment
-
         try:
             for epoch in range(self.current_epoch, self.config['num_epochs']):
                 self.current_epoch = epoch
@@ -601,11 +584,6 @@ class BaijuTrainer:
                 print(f'Epoch {epoch} 完成 | 时间: {epoch_time:.2f}s | '
                       f'平均损失: {avg_loss:.4f} | 困惑度: {ppl:.2f} | '
                       f'自回归比例: {self.auto_reg_ratio:.2f}')
-
-                # 更新自回归比例（线性增加，最大1.0）
-                self.auto_reg_ratio = min(1.0, self.auto_reg_ratio + increment)
-
-                # 保存检查点等...
                 is_best = avg_loss < self.best_loss
                 if is_best:
                     self.best_loss = avg_loss
@@ -722,11 +700,11 @@ def main():
     # 训练配置
     config = {
         'data_path': 'MD19950617/BelleGroup_train_3.5M_CN',
-        'batch_size': 1,
+        'batch_size': 16,
         'seq_len': 128,
-        'd_model': 1024,
-        'd_state': 1024,
-        'learning_rate': 5e-5,
+        'd_model': 64,
+        'd_state': 32,
+        'learning_rate': 1e-4,
         'weight_decay': 1e-2,
         'grad_clip': 1,
         'num_epochs': 1,
@@ -734,9 +712,9 @@ def main():
         'save_interval': 5,
         'save_dir': 'checkpoints',
         'num_workers': 0,
-        'num_blocks':16,
+        'num_blocks':2,
         'train_jsonl_path':'distill_r1_110k_sft.jsonl',
-        'gradient_accumulation_steps':16,
+        'gradient_accumulation_steps':1,
     }
     print('初始化')
     # 创建训练器
@@ -761,7 +739,7 @@ def train_continue():
         'batch_size': 1,
         'seq_len': 128,
         'd_model': 512,
-        'd_state': 16,
+        'd_state': 1024,
         'learning_rate': 1e-4,
         'weight_decay': 1e-2,
         'grad_clip': 1,
@@ -770,13 +748,14 @@ def train_continue():
         'save_interval': 5,
         'save_dir': 'checkpoints',
         'num_workers': 0,
-        'num_blocks':2,
-        'train_jsonl_path': 'distill_r1_110k_sft.jsonl'
+        'num_blocks': 16,
+        'train_jsonl_path': 'distill_r1_110k_sft.jsonl',
+        'gradient_accumulation_steps': 16,
+        'num_layers': 32
     }
-
     # 创建训练器
     trainer = BaijuTrainer(config)
-    trainer.load_checkpoint('checkpoints/best_model.pth')
+    trainer.load_checkpoint('checkpoints/checkpoint_epoch_0.pth')
     print('初始化完成')
     # 开始训练
     try:
@@ -788,7 +767,7 @@ def train_continue():
     # 测试文本生成
     print("\n测试文本生成...")
     prompt = "人工智能"
-    generated = trainer.generate_text(prompt, max_length=50,temperature=0.4,top_k=40)
+    generated = trainer.generate_text(prompt, max_length=50, temperature=0.4)
     print(f"提示: {prompt}")
     print(f"生成: {generated}")
 def eval(prompt, max_length=100, temperature=1.0):

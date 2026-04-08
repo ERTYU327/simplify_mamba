@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class CausalConv1d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, padding,groups):
         super().__init__()
@@ -64,7 +65,7 @@ class BaijuFlex(nn.Module):
             self.P_chol.append(nn.Parameter(torch.eye(dim)))
         # 因果卷积
         self.causalconv1d = CausalConv1d(
-            in_channels=d_model, out_channels=d_state,
+            in_channels=d_state, out_channels=d_state,
             kernel_size=2, padding=0, groups=2
         )
 
@@ -78,17 +79,24 @@ class BaijuFlex(nn.Module):
             nn.Linear(d_state, d_state, bias=True),
             nn.Sigmoid(),
             nn.Linear(d_state, d_state, bias=True),
+            nn.Sigmoid(),
         )
         self.dt_proj = nn.Sequential(
             nn.Linear(d_state, d_state, bias=True),
             nn.Sigmoid(),
             nn.Linear(d_state, d_state, bias=True),
+            nn.Sigmoid(),
         )
-
-        # 输出投影
+        dim = num_blocks
+        self.k_proj = nn.Sequential(
+            nn.Linear(dim, d_state, bias=True),
+            nn.Sigmoid(),
+            nn.Linear(d_state, d_state, bias=True),
+            nn.Sigmoid(),
+        )
         self.out_proj = nn.Linear(d_state, d_model, bias=True)
 
-        self.dropout = nn.Dropout(p=0.2)  # 仅在输出时使用
+        self.dropout = nn.Dropout(p=0.0)  # 仅在输出时使用
     def _get_branch_params(self,u):
 
         A_list = []
@@ -205,7 +213,7 @@ class BaijuFlex(nn.Module):
     def step(self, u_init, seq_length):
         B, L, _ = u_init.shape
         N = seq_length//L + 1
-        x_init = self.in_proj(u_init)  # (B, L, d_state)
+        x_init = self.in_proj(u_init)
         h_next = x_init
         h_total = []
         for _ in range(N):
@@ -218,30 +226,40 @@ class BaijuFlex(nn.Module):
             A_dot = self._weighted_combine(A_list, w_dot, dim=-1)
             A_euc = self._weighted_combine(A_list, w_euc, dim=-1)
             A_liman = self._weighted_combine(A_list, w_liman, dim=-1)
-
+            A = A_dot + A_euc + A_liman + A_liman * A_dot * A_euc
             B = self.B_proj(u)  # (B, L, d_state)
             C = self.C1_proj(u)  # (B, L, d_state)1
             dt = self.dt_proj(u)  # (B, L, d_state)
-            A_dot = -torch.exp(A_dot)
-            A_euc = -torch.exp(A_euc)
-            A_liman = -torch.exp(A_liman)
+            K1 = self.k_proj(scores_dot)
+            K2 = self.k_proj(scores_euc)
+            K3 = self.k_proj(scores_liman)
+            A = -torch.exp(A)
             dt = F.softplus(dt)
-            I = torch.ones_like(A_dot)
-            dA_dot = I + A_dot * dt
-            dA_euc = I + A_euc * dt
-            dA_liman = I + A_liman * dt
-            dA = dA_dot + dA_euc + dA_liman + dA_dot * dA_euc * dA_liman
+            I = torch.ones_like(A)
+            dA = I + A * dt
             dB = B * dt
-            Mt = dA
-            Nt = dB * u
-            elems = torch.stack([Mt, Nt], dim=1)  # (B, 2, L, D_state)
-            elems = elems.permute(2, 1, 0, 3)  # (L, 2, B, D_state)
+            S  = I - dt
+            Mt1 = dA * (I - (K1 * C + K2 + K3)*S/ 4)
+            Nt1 = (dB + K1 - K2 * K1 * K3 * C * dB) * u
+            elems1 = torch.stack([Mt1, Nt1], dim=1).permute(2, 1, 0, 3)  # (L, 2, B, d_state)
+            result1 = associative_scan(elems1, combine=self.combine)
+            result1 = result1.permute(2, 1, 0, 3)  # (B, 2, L, d_state)
+            h_seq1 = result1[:, 1]  # (B, L, d_state)
 
-            result = associative_scan(elems, combine=self.combine)
-            result = result.permute(2, 1, 0, 3)  # (B, 2, L, D_state)
-            M_prefix, N_prefix = result[:, 0], result[:, 1]  # (B, L, D_state)
+            Mt2 = dA * (I - (K2 * C + K1 + K3)*S/ 4)
+            Nt2 = (dB + K2 - K1 * K2 * K3 * C * dB) * u
+            elems2 = torch.stack([Mt2, Nt2], dim=1).permute(2, 1, 0, 3)
+            result2 = associative_scan(elems2, combine=self.combine)
+            result2 = result2.permute(2, 1, 0, 3)
+            h_seq2 = result2[:, 1]
 
-            h_next = N_prefix
+            Mt3 = dA * (I - (K3 * C + K1 + K2)*S/ 4)
+            Nt3 = (dB + K3 - K1 * K2 * K3 * C * dB) * u
+            elems3 = torch.stack([Mt3, Nt3], dim=1).permute(2, 1, 0, 3)
+            result3 = associative_scan(elems3, combine=self.combine)
+            result3 = result3.permute(2, 1, 0, 3)
+            h_seq3 = result3[:, 1]
+            h_next = h_seq1 + h_seq2 + h_seq3
             h = h_next
             h = C * h
             h_total.append(h)
@@ -274,9 +292,10 @@ class BaijuFlex(nn.Module):
     def forward(self, u_init, seq_length):
         B, L, _ = u_init.shape
         N = seq_length//L + 1
-        x_init = self.in_proj(u_init)  # (B, L, d_state)
+        x_init = self.in_proj(u_init)
         h_next = x_init
         h_total = []
+        A_loss  = 0
         for _ in range(N):
             u = h_next
             A_list, u_list, k_list, scale_list = self._get_branch_params(u)
@@ -287,36 +306,47 @@ class BaijuFlex(nn.Module):
             A_dot = self._weighted_combine(A_list, w_dot, dim=-1)
             A_euc = self._weighted_combine(A_list, w_euc, dim=-1)
             A_liman = self._weighted_combine(A_list, w_liman, dim=-1)
-
+            A = A_dot + A_euc + A_liman + A_dot * A_liman * A_euc
             B = self.B_proj(u)  # (B, L, d_state)
             C = self.C1_proj(u)  # (B, L, d_state)
             dt = self.dt_proj(u)  # (B, L, d_state)
-            A_dot = -torch.exp(A_dot)
-            A_euc = -torch.exp(A_euc)
-            A_liman = -torch.exp(A_liman)
+            K1 = self.k_proj(scores_dot)
+            K2 = self.k_proj(scores_euc)
+            K3 = self.k_proj(scores_liman)
+            A = -torch.exp(A)
             dt = F.softplus(dt)
-            I = torch.ones_like(A_dot)
-            dA_dot = I + A_dot * dt
-            dA_euc = I + A_euc * dt
-            dA_liman = I + A_liman * dt
-            dA = dA_dot + dA_euc + dA_liman + dA_dot * dA_euc * dA_liman
+            I = torch.ones_like(A)
+            dA = I + A * dt
             dB = B * dt
-            Mt = dA
-            Nt = dB * u
-            elems = torch.stack([Mt, Nt], dim=1)  # (B, 2, L, D_state)
-            elems = elems.permute(2, 1, 0, 3)  # (L, 2, B, D_state)
+            S  = I - dt
+            Mt1 = dA*(I - (K1 * C + K2 + K3)*S/4 )
+            Nt1 = (dB + K1 - K2 * K1 * K3 * C * dB) * u
+            elems1 = torch.stack([Mt1, Nt1], dim=1).permute(2, 1, 0, 3)  # (L, 2, B, d_state)
+            result1 = associative_scan(elems1, combine=self.combine)
+            result1 = result1.permute(2, 1, 0, 3)  # (B, 2, L, d_state)
+            h_seq1 = result1[:, 1]  # (B, L, d_state)
 
-            result = associative_scan(elems, combine=self.combine)
-            result = result.permute(2, 1, 0, 3)  # (B, 2, L, D_state)
-            M_prefix, N_prefix = result[:, 0], result[:, 1]  # (B, L, D_state)
+            Mt2 = dA*(I - (K2 * C + K1 + K3)*S/4)
+            Nt2 = (dB + K2 - K1 * K2 * K3 * C * dB) * u
+            elems2 = torch.stack([Mt2, Nt2], dim=1).permute(2, 1, 0, 3)
+            result2 = associative_scan(elems2, combine=self.combine)
+            result2 = result2.permute(2, 1, 0, 3)
+            h_seq2 = result2[:, 1]
 
-            h_next = N_prefix
+            Mt3 = dA*(I - (K3 * C + K1 + K2)*S/4)
+            Nt3 = (dB + K3 - K1 * K2 * K3 * C * dB) * u
+            elems3 = torch.stack([Mt3, Nt3], dim=1).permute(2, 1, 0, 3)
+            result3 = associative_scan(elems3, combine=self.combine)
+            result3 = result3.permute(2, 1, 0, 3)
+            h_seq3 = result3[:, 1]
+            h_next = h_seq1 + h_seq2 + h_seq3
             h = h_next
             h = C * h
             h_total.append(h)
+            A_loss = A_loss + A_list_loss
         y_final = torch.cat(h_total, dim=1)
         y_final = y_final[:,:seq_length,:]
         y_final = self.out_proj(y_final)  # (B, L, d_model)
         y_final = self.layer_norm(y_final)
         y_final = self.dropout(y_final)
-        return y_final
+        return y_final,A_loss

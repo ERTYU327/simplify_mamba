@@ -69,14 +69,9 @@ class SFTDataset(Dataset):
         if self.tokenizer.eos_token_id is not None:
             response_ids.append(self.tokenizer.eos_token_id)
 
-        #input_ids = prompt_ids + response_ids
+        input_ids = prompt_ids + response_ids
 
-        input_ids = prompt_ids
-
-        #labels = [-100] * prompt_len + response_ids
-        #labels = prompt_ids + response_ids
-        #labels = [-100] * prompt_len + response_ids
-        labels = response_ids
+        labels = [-100] * prompt_len + response_ids
         return {
             'input_ids': input_ids,
             'labels': labels,
