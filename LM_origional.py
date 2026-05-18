@@ -8,28 +8,23 @@ class LM_factor(nn.Module):
         super(LM_factor, self).__init__()
         self.d_model = d_model
         self.d_state = d_state
-        self.BaijuFlex = BaijuFlex(d_model,d_state,first_block,other_block,order,dx=dx)
+        self.BaijuFlex = BaijuFlex(d_model, d_state, first_block, other_block, order, dx=dx)
         self.layer_norm = nn.LayerNorm(d_model)
     def forward(self,x,init):
         x1,h1 = self.BaijuFlex.forward(x, init)
-        x1 = self.layer_norm(x1)
         return x1, h1
-
     def step_generate(self, x, h):
         x1,h1 = self.BaijuFlex.step(x, h=h)
-        x1 = self.layer_norm(x1)
         return x1, h1
 class LM_last(nn.Module):
     def __init__(self, d_model,d_state,first_block,other_block,order,dx=4):
         super(LM_last, self).__init__()
         self.d_model = d_model
         self.d_state = d_state
-        self.BaijuFlex = BaijuFlex(d_model,d_state,first_block,other_block,order,dx=dx)
-        self.layer_norm = nn.LayerNorm(d_model)
+        self.BaijuFlex = BaijuFlex(d_model, d_state, first_block, other_block, order, dx=dx)
     def forward(self,x,init):
         x1,h1 = self.BaijuFlex.forward(x, init)
         return x1, h1
-
     def step_generate(self, x, h):
         x1,h1 = self.BaijuFlex.step(x, h=h)
         return x1, h1

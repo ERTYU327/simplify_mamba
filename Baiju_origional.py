@@ -30,15 +30,20 @@ class BaijuFlex(nn.Module):
         self.n_branches = len(branch_dims)
         self.in_proj = nn.Linear(self.d_model, self.d_state, bias=True)
         self.layer_norm = nn.LayerNorm(d_model)
-        self.activation = nn.GELU()
         self.A_projs = nn.Sequential(
             nn.Linear(d_model, d_state, bias=True),
+            nn.GELU(),
+            nn.Linear(d_state, d_state, bias=True),
         )
         self.u_projs = nn.Sequential(
             nn.Linear(d_model, d_state, bias=True),
+            nn.GELU(),
+            nn.Linear(d_state, d_state, bias=True),
         )
         self.k_projs = nn.Sequential(
             nn.Linear(d_model, d_state, bias=True),
+            nn.GELU(),
+            nn.Linear(d_state, d_state, bias=True),
         )
         self.P_chol_raw = nn.ParameterList()
         for dim in branch_dims:
@@ -50,13 +55,15 @@ class BaijuFlex(nn.Module):
         self.beta = nn.ParameterList()
         for i in range(dx):
             self.beta.append(nn.Parameter(torch.tensor(1.0/dx)))
-        # B, C, dt 投影
         self.B_proj = nn.Sequential(
             nn.Linear(d_model, d_state, bias=True),
-            nn.GELU()
+            nn.GELU(),
+            nn.Linear(d_state, d_state, bias=True),
         )
         self.C1_proj = nn.Sequential(
             nn.Linear(d_model, d_state, bias=True),
+            nn.GELU(),
+            nn.Linear(d_state, d_state, bias=True),
         )
         self.D_proj = nn.Sequential(
             nn.Linear(d_model, d_state, bias=True),
@@ -64,7 +71,9 @@ class BaijuFlex(nn.Module):
         )
         self.dt_proj = nn.Sequential(
             nn.Linear(d_model, d_state, bias=True),
-            nn.Sigmoid()
+            nn.Sigmoid(),
+            nn.Linear(d_state, d_state, bias=True),
+            nn.Sigmoid(),
         )
         self.out_proj = nn.Linear(d_state, d_model, bias=True)
         self.K_proj = nn.ModuleList()
@@ -73,9 +82,13 @@ class BaijuFlex(nn.Module):
                 nn.Sequential(
                     nn.Linear(d_state, d_state, bias=True),
                     nn.Sigmoid(),
+                    nn.Linear(d_state, d_state, bias=True),
+                    nn.Sigmoid(),
                 )
             )
         self.resssm = nn.Sequential(
+            nn.Linear(d_model, d_model, bias=True),
+            nn.GELU(),
             nn.Linear(d_model, d_model, bias=True),
         )
         self.dropout = nn.Dropout(p=0.00)
@@ -420,14 +433,12 @@ class BaijuFlex(nn.Module):
         h_next, C, dt, x = self.encoder(u,init)
         y = self.decoder(h_next,C,dt,x,u)
         y = self.out_proj(y)
-        y = resssm + y
-        y = self.activation(y)
+        y = resssm * y
         return y,h_next
     def step(self,u,h):
         resssm = self.resssm(u)
         h_next, C, dt, x = self.step_encoder(u,h)
         y = self.step_decoder(h_next,C,dt,x,u)
         y = self.out_proj(y)
-        y = resssm + y
-        y = self.activation(y)
+        y = resssm * y
         return y,h_next
