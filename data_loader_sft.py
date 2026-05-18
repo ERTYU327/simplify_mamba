@@ -66,17 +66,23 @@ class SFTDataset(Dataset):
         #prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
         #response_ids = self.tokenizer.encode(response, add_special_tokens=False)
         self.tokenizer.add_special_tokens({'additional_special_tokens': ['<|sep|>']})
-        prompt_len = len(prompt_ids)
+        #prompt_len = len(prompt_ids)
         if self.tokenizer.eos_token_id is not None:
             response_ids.append(self.tokenizer.eos_token_id)
 
         input_ids = prompt_ids + response_ids
-        response = [-100] * len(prompt_ids)  + response_ids
+
+        response = prompt_ids + response_ids
+        #response = [-100] * len(prompt_ids) + response_ids
         return {
             'input_ids': input_ids,
             'response': response,
             'attention_mask': [1] * len(input_ids) ,
         }
+    def _split_sentences(self, text: str) -> List[str]:
+        import re
+        sentences = re.split(r'(?<=[。!？!?\n])', text)
+        return [s.strip() for s in sentences if s.strip()]
 def collate_fn(batch: List[Dict], tokenizer: AutoTokenizer, max_length: int):
     """
     动态 padding 和截断，生成 attention_mask，并返回张量。
@@ -91,22 +97,28 @@ def collate_fn(batch: List[Dict], tokenizer: AutoTokenizer, max_length: int):
         input_ids_list.append(input_ids)
         labels_list.append(response)
 
-    #max_len = max(len(ids) for ids in input_ids_list)
+    max_len = max(len(ids) for ids in input_ids_list)
     #max_len = min(max_len, max_length)
 
-    #padded_input_ids = []
-    #padded_labels = []
-    #attention_masks = []
-    #for input_ids, labels in zip(input_ids_list, labels_list):
-        #pad_len = max_len - len(input_ids)
-        #pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-        #padded_input_ids.append(input_ids + [pad_id] * pad_len)
-        #padded_labels.append(labels + [-100] * pad_len)
-        #attention_masks.append([1] * len(input_ids) + [0] * pad_len)
 
+    padded_input = 0
+    padded_response = 0
+    padded_input_ids_list = []
+    padded_labels_list = []
+    #attention_masks = []
+    for input_ids, labels in zip(input_ids_list, labels_list):
+        pad_len = max_len - len(input_ids)
+        pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+        padded_input_ids = torch.tensor(input_ids + [pad_id] * pad_len)
+        padded_input_ids_list.append(padded_input_ids)
+        padded_labels = torch.tensor(labels + [-100] * pad_len)
+        padded_labels_list.append(padded_labels)
+        #attention_masks.append([1] * len(input_ids) + [0] * pad_len)
+    padded_input = torch.stack(padded_input_ids_list,dim=0)
+    padded_response = torch.stack(padded_labels_list,dim=0)
     return {
-        'input_ids': torch.tensor(input_ids_list, dtype=torch.long),
-        'response': torch.tensor(labels_list, dtype=torch.long),
+        'input_ids': padded_input,
+        'response': padded_response,
         #'attention_mask': torch.tensor(attention_masks, dtype=torch.long),
     }
 
