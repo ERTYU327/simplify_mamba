@@ -32,15 +32,12 @@ class BaijuFlex(nn.Module):
         self.layer_norm = nn.LayerNorm(d_model)
         self.A_projs = nn.Sequential(
             nn.Linear(d_model, d_state, bias=True),
-            nn.Sigmoid(),
         )
         self.u_projs = nn.Sequential(
             nn.Linear(d_model, d_state, bias=True),
-            nn.Sigmoid(),
         )
         self.k_projs = nn.Sequential(
             nn.Linear(d_model, d_state, bias=True),
-            nn.Sigmoid(),
         )
         self.P_chol_raw = nn.ParameterList()
         for dim in branch_dims:
@@ -57,7 +54,6 @@ class BaijuFlex(nn.Module):
         )
         self.C1_proj = nn.Sequential(
             nn.Linear(d_model, d_state, bias=True),
-            nn.Sigmoid(),
         )
         self.D_proj = nn.Sequential(
             nn.Linear(d_model, d_state, bias=True),
@@ -78,7 +74,14 @@ class BaijuFlex(nn.Module):
         self.resssm = nn.Sequential(
             nn.Linear(d_model, d_model, bias=True),
         )
+        self._init_weights()
         self.dropout = nn.Dropout(p=0.00)
+    def _init_weights(self):
+        for name, module in self.named_modules():
+            if isinstance(module, nn.Linear):
+                if any(act in name for act in
+                       ['dt_proj', 'K_proj']):
+                    nn.init.xavier_uniform_(module.weight)
     def linear_scan(self, a, b, h0):
         eps = 1e-8
         cumprod_a = torch.cumprod(a, dim=1)
@@ -148,10 +151,13 @@ class BaijuFlex(nn.Module):
             K_plus = K_plus + Ki
             K.append(Ki)
         return K_cheng,K_plus,K
+    def _z_(self,x):
+        y = ((2 + x)**2)/((2 - x)**2)
+        return y
     def compute_A(self,A_metrix):
         A = []
         for i in range(12 * self.order):
-            A_i = -torch.exp(A_metrix[i])
+            A_i = - self._z_(A_metrix[i])
             A.append(A_i)
         return A
     def _compute_h_step(self,A,B,C,dt,K,K_cheng,K_plus,x,h):
@@ -163,8 +169,8 @@ class BaijuFlex(nn.Module):
             for i in range(self.dx):
                 x_i = x ** (i + 1)
                 dt_i = dt ** (i + 1)
-                dC_i = torch.exp(((-1) ** i) * (C[j] ** (i + 1)) * dt_i)
-                dA_i = torch.exp(((-1) ** i) * (A[j] ** (i + 1)) * dt_i)
+                dC_i = self._z_(((-1) ** i) * (C[j] ** (i + 1)) * dt_i)
+                dA_i = self._z_(((-1) ** i) * (A[j] ** (i + 1)) * dt_i)
                 dB_i = B * dt_i
                 Mt_i = dA_i * (I - (K[j] * dC_i + K_plus - K[j]) * dt_i / (12 * self.order))
                 Nt_i = (dB_i + K[j] * dt_i - K_cheng * dC_i * dB_i) * x_i
@@ -185,7 +191,7 @@ class BaijuFlex(nn.Module):
             for i in range(self.dx):
                 x_i = x ** (i + 1)
                 dt_i = dt ** (i + 1)
-                dC_i = torch.exp(((-1) ** i) * (C[j] ** (i + 1)) * dt_i)
+                dC_i = self._z_(((-1) ** i) * (C[j] ** (i + 1)) * dt_i)
                 dD_i = D * dt_i
                 Mt_i = dC_i
                 Nt_i = dD_i * x_i
@@ -206,8 +212,8 @@ class BaijuFlex(nn.Module):
             for i in range(self.dx):
                 x_i = x ** (i + 1)
                 dt_i = dt ** (i + 1)
-                dC_i = torch.exp(((-1) ** i) * (C[j] ** (i + 1)) * dt_i)
-                dA_i = torch.exp(((-1) ** i) * (A[j] ** (i + 1)) * dt_i)
+                dC_i = self._z_(((-1) ** i) * (C[j] ** (i + 1)) * dt_i)
+                dA_i = self._z_(((-1) ** i) * (A[j] ** (i + 1)) * dt_i)
                 dB_i = B * dt_i
                 Mt_i = dA_i * (I - (K[j] * dC_i + K_plus - K[j]) * dt_i / (12 * self.order))
                 Nt_i = (dB_i + K[j] * dt_i - K_cheng * dC_i * dB_i) * x_i
@@ -226,7 +232,7 @@ class BaijuFlex(nn.Module):
             for i in range(self.dx):
                 x_i = x ** (i + 1)
                 dt_i = dt ** (i + 1)
-                dC_i = torch.exp(((-1) ** i) * (C[j] ** (i + 1)) * dt_i)
+                dC_i = self._z_(((-1) ** i) * (C[j] ** (i + 1)) * dt_i)
                 dD_i = D * dt_i
                 Mt_i = dC_i
                 Nt_i = dD_i * x_i
